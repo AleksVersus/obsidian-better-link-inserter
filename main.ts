@@ -1,66 +1,77 @@
-import { Editor, MarkdownView, Plugin } from "obsidian";
+import { Editor, MarkdownView, Plugin, EditorPosition } from "obsidian";
 
-export default class BetterLinkInserterPlugin extends Plugin {
+export default class BetterMarkdownLinkInserterPlugin extends Plugin {
+	private hasEnteringLinkPath: boolean = false;
+	private enteringObserverPosition: EditorPosition = { line: 0, ch: 0 };
+	private alias:string = "";
+	private editorChangeEventRef: any = null;
+	
 	async onload() {
 		this.addCommand({
 			id: "use-selected-word-as-alias",
 			name: "Insert an internal link (using selected word as alias if possible)",
 			editorCallback: this.insertInternalLinkWithAlias,
 		});
+		this.editorChangeEventRef = this.app.workspace.on("editor-change", (editor: Editor, markdownView: MarkdownView) => {
+			if (this.hasEnteringLinkPath) {
+				const start = this.enteringObserverPosition;
+				const end = { line: start.line, ch: start.ch + 2 };
+				const linkStartWith = editor.getRange(start, end);
+				if (linkStartWith !== "[[") {
+					// ссылка больше не начинается с [[, значит она уже превратилась в md.
+					// можно md спокойно обработать, но пока что излечём
+					const cursorPosition = editor.getCursor();
+					const mdLink = editor.getRange(start, cursorPosition);
+					this.hasEnteringLinkPath = false;
+					// Парсим markdown ссылку
+					const linkMatch = mdLink.match(/\[([^\]]+)\]\(([^)]+)\)/);
+					if (linkMatch) {
+						const [, currentAlias, path] = linkMatch;
+						// Заменяем alias если он есть
+						const newAlias = this.alias || currentAlias || "";
+						const newMdLink = newAlias ? `[${newAlias}](${path})` : mdLink;
+						
+						// Заменяем в редакторе
+						editor.replaceRange(newMdLink, start, cursorPosition);
+					}
+					this.alias = "";
+					this.enteringObserverPosition = {line:0, ch:0};
+				}
+			}
+		});
 	}
 
-	onunload() {}
+	onunload() {
+		// Отписываемся от события при выгрузке плагина
+		if (this.editorChangeEventRef) {
+			this.app.workspace.off("editor-change", this.editorChangeEventRef);
+			this.editorChangeEventRef = null;
+		}
+	}
 
 	private insertInternalLinkWithAlias = (editor: Editor, view: MarkdownView) => {
-		const selectedWord = editor.getSelection();
-		const hasSelectedWord = selectedWord !== "";
+		const selectedWord:string = editor.getSelection(); // получаем выделение
+		const hasSelectedWord:boolean = selectedWord !== ""; // что-то выделено или нет 
+		this.alias = selectedWord;
+		// текст, помещаемый внутрь ссылки, если выделен
+		const linkText:string = hasSelectedWord ? `|${selectedWord}` : "";
+		// смещение курсора после оборачивания в ссылку
+		const cursorOffset:number = hasSelectedWord ? 3 + selectedWord.length : 2;
 
-		const linkText = hasSelectedWord ? `|${selectedWord}` : "";
-		const cursorOffset = hasSelectedWord ? 3 + selectedWord.length : 2;
-
-		// Вставляем вики-ссылку
-		this.replaceSelectionAndMoveCursor(editor, `[[${linkText}]]`, cursorOffset);
-
-		// Запоминаем позицию вставленной ссылки
-		const from = editor.getCursor("from");
-		const to = editor.getCursor("to");
-		const linkStart = { ...from, ch: from.ch - (hasSelectedWord ? 4 + selectedWord.length : 3) };
-		const linkEnd = { ...from };
-
-		// Обработчик перемещения курсора
-		const onCursorActivity = () => {
-			const pos = editor.getCursor();
-			// Если курсор вне диапазона вставленной ссылки
-			if (
-				pos.line !== linkStart.line ||
-				pos.ch < linkStart.ch ||
-				pos.ch > linkEnd.ch
-			) {
-				// Получаем текст ссылки
-				const linkText = editor.getRange(linkStart, linkEnd);
-				// Парсим [[note|alias]]
-				const match = linkText.match(/\[\[([^\|\]]+)\|?([^\]]*)\]\]/);
-				if (match) {
-					const note = match[1];
-					const alias = match[2] || note;
-					const mdLink = `[${alias}](${note})`;
-					editor.replaceRange(mdLink, linkStart, linkEnd);
-				}
-				// Снимаем обработчик
-				(editor as any).off("cursorActivity", onCursorActivity);
-			}
-		};
-
-		// Вешаем обработчик
-		(editor as any).on("cursorActivity", onCursorActivity);
+		this.replaceSelectionAndMoveCursor(editor, linkText, cursorOffset);
 	};
 
 	private replaceSelectionAndMoveCursor = (editor: Editor, text: string, cursorOffset: number) => {
-		editor.replaceSelection(text);
+		editor.replaceSelection(`[[${text}]]`); // заменяет выделение (то есть оборачивает в ссылку)
 
-		const cursorPosition = editor.getCursor();
-		cursorPosition.ch -= cursorOffset;
+		const cursorPosition = editor.getCursor(); // EditorPosition
+		cursorPosition.ch -= cursorOffset; // перемещает курсор внтурь ссылки для ввода пути
 
+		if (this.alias !== "") {
+			this.hasEnteringLinkPath = true; // включаем режим перехвата ввода
+			// позиция символов, за которыми следим
+			this.enteringObserverPosition = {line: cursorPosition.line, ch: cursorPosition.ch - 2};
+		}
 		editor.setCursor(cursorPosition);
 	};
 }
